@@ -54,7 +54,7 @@ through all of them.
 - 🔌 **Dropout recovery**: reconnect a speaker that went out of range
 - 🔔 **"Which one is which?"**: beep a single speaker (the tone is generated in pure shell)
 - 🎵 **Built-in player**: play a file or a whole folder, or just use Spotify, a browser or VLC
-- 🧪 **88 automated tests** that run without any Bluetooth hardware
+- 🧪 **95 automated tests** that run without any Bluetooth hardware
 
 ## 🚀 Quick start
 
@@ -135,7 +135,7 @@ bluetooth-jam/
 │   ├── menus.sh        # all menus
 │   └── player.sh       # background music player (mpv/ffplay/cvlc/pw-play/paplay)
 └── tests/
-    └── run_tests.sh    # 88 checks against simulated bluetoothctl + pactl
+    └── run_tests.sh    # 95 checks against simulated bluetoothctl + pactl
 ```
 
 Every part of the program is a `.sh` file. There are no other languages and no GUI frameworks.

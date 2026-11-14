@@ -52,7 +52,14 @@ cat >"$WORK/mocklib.sh" <<'MOCK'
 D=$MOCK_DIR
 next() { local n; n=$(cat "$D/next"); echo $((n + 1)) >"$D/next"; echo "$n"; }
 card_of_mac() { local m=${1^^}; echo "bluez_card.${m//:/_}"; }
-sink_of_card() { echo "bluez_output.${1#bluez_card.}.1"; }
+sink_of_card() {              # CARD -> sink name, in the style stored for that card
+  local id=${1#bluez_card.}
+  if grep -qF "|$1|" "$D/cards" && [[ $(awk -F'|' -v c="$1" '$2==c{print $5}' "$D/cards") == colon ]]; then
+    echo "bluez_output.${id//_/:}"          # PipeWire 1.6+ style
+  else
+    echo "bluez_output.$id.1"
+  fi
+}
 rm_sink() {
   awk -F'|' -v n="$1" '$2!=n' "$D/sinks" >"$D/t" && mv "$D/t" "$D/sinks"
   awk -F'|' -v n="$1" '!($2==n && $4=="internal")' "$D/inputs" >"$D/t" && mv "$D/t" "$D/inputs"
@@ -63,9 +70,9 @@ card_set_profile() {          # CARD PROFILE
   if [[ $p == off ]]; then rm_sink "$s"
   elif ! grep -qF "|$s|" "$D/sinks"; then echo "$(next)|$s|20|100|no" >>"$D/sinks"; fi
 }
-card_add() {                  # MAC PROFILE
+card_add() {                  # MAC PROFILE [colon]
   local c; c=$(card_of_mac "$1")
-  grep -qF "|$c|" "$D/cards" || echo "$(next)|$c|off|0" >>"$D/cards"
+  grep -qF "|$c|" "$D/cards" || echo "$(next)|$c|off|0|${3:-}" >>"$D/cards"
   card_set_profile "$c" "$2"
 }
 card_remove() {               # MAC
@@ -107,7 +114,7 @@ case "$1" in
             echo
           done <"$D/inputs" ;;
         cards)
-          while IFS='|' read -r i card prof off; do
+          while IFS='|' read -r i card prof off _; do
             printf 'Card #%d\n\tName: %s\n\tDriver: module-bluez5-device.c\n\tProfiles:\n' "$i" "$card"
             printf '\t\ta2dp-sink: High Fidelity Playback (A2DP Sink) (sinks: 1, sources: 0, priority: 40, available: yes)\n'
             printf '\t\theadset-head-unit: Headset Head Unit (HSP/HFP) (sinks: 1, sources: 1, priority: 30, available: yes)\n'
@@ -193,6 +200,7 @@ case "$1" in
       case $(field "$2" 7) in
         profileoff) card_add "$2" off ;;
         noprofile | dead) ;;
+        colon) card_add "$2" a2dp-sink colon ;;
         *) card_add "$2" a2dp-sink ;;
       esac
     fi
@@ -357,6 +365,21 @@ check "3 speakers can jam together"      jam_build $A $E $F
 check "profile list puts A2DP first"     test "$(audio_output_profiles bluez_card.BB_BB_BB_00_00_01 | head -1)" = a2dp-sink
 check "diagnose.sh runs"                 eval '(cd "$WORK" && "$ROOT/diagnose.sh" $E >/dev/null 2>&1) && grep -q "Active mode:  a2dp-sink" "$WORK/bt-jam-report.txt"'
 check "diagnose.sh flags missing channel" eval '(cd "$WORK" && "$ROOT/diagnose.sh" $G >/dev/null 2>&1) && grep -q "music channel is not open" "$WORK/bt-jam-report.txt"'
+
+# ---------------------------------------------------------------------
+echo "== PipeWire 1.6 sink names (bluez_output.AA:BB:… with colons)"
+reset_world
+R=84:0F:2A:FF:5E:62
+echo "$R|realme Buds Wireless 3 Neo|1|no|no|1|colon" >>"$MOCK_DIR/devices"
+out=$(bt_connect $R 2>&1); rc=$?
+check "connects first time"              test $rc -eq 0
+check "found the colon-style output"     test "$(audio_sink_for_mac $R)" = "bluez_output.$R"
+check "no needless reconnect"            eval '! grep -q "Reconnecting" <<<"$out"'
+check "listed as connected speaker"      eval 'audio_bt_macs | grep -qx $R'
+bt_connect $A >/dev/null
+check "jam mixes old + new name styles"  jam_build $A $R
+check "both styles in the combine"       eval 'slaves_of | grep -qF "bluez_output.$R" && slaves_of | grep -q AA_AA_AA_00_00_01'
+check "status shows both live"           test -z "$(jam_dropped)"
 
 # ---------------------------------------------------------------------
 echo "== Menu: Quick Jam end-to-end (as a user would type it)"

@@ -23,21 +23,24 @@ mac_id() { local m=${1^^}; printf '%s' "${m//:/_}"; }
 audio_sink_exists() { pa list short sinks 2>/dev/null | awk -v n="$1" '$2 == n {f = 1} END {exit !f}'; }
 
 # Sink of a Bluetooth device, e.g. bluez_output.AA_BB_….1 / bluez_sink.AA_BB_….a2dp_sink
+# Matches both naming styles: bluez_output.AA_BB_CC_DD_EE_FF.1 (older) and
+# bluez_output.AA:BB:CC:DD:EE:FF (PipeWire 1.6+), plus PulseAudio's bluez_sink.*
 audio_sink_for_mac() {
-  local id; id=$(mac_id "$1")
+  local id mac=${1^^}; id=$(mac_id "$1")
   pa list short sinks 2>/dev/null |
-    awk -v id="$id" '$2 !~ /^bt_jam_/ && index(toupper($2), id) {print $2; exit}'
+    awk -v id="$id" -v mac="$mac" '$2 !~ /^bt_jam_/ && (index(toupper($2), id) || index(toupper($2), mac)) {print $2; exit}'
 }
 
 audio_card_for_mac() {
-  local id; id=$(mac_id "$1")
-  pa list short cards 2>/dev/null | awk -v id="$id" 'index(toupper($2), id) {print $2; exit}'
+  local id mac=${1^^}; id=$(mac_id "$1")
+  pa list short cards 2>/dev/null |
+    awk -v id="$id" -v mac="$mac" 'index(toupper($2), id) || index(toupper($2), mac) {print $2; exit}'
 }
 
 # MACs of every Bluetooth speaker that currently has a sound output
 audio_bt_macs() {
   pa list short sinks 2>/dev/null | awk '$2 ~ /^bluez/ {print $2}' |
-    grep -oE '([0-9A-Fa-f]{2}_){5}[0-9A-Fa-f]{2}' | tr '_abcdef' ':ABCDEF' | awk '!seen[$0]++'
+    grep -oE '([0-9A-Fa-f]{2}[_:]){5}[0-9A-Fa-f]{2}' | tr '_abcdef' ':ABCDEF' | awk '!seen[$0]++'
 }
 
 audio_wait_for_sink() {          # MAC SECONDS -> prints sink name
