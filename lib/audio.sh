@@ -41,8 +41,9 @@ audio_bt_macs() {
 }
 
 audio_wait_for_sink() {          # MAC SECONDS -> prints sink name
-  local i s
-  for ((i = 0; i < $2 * 2; i++)); do
+  local i s n=$(($2 * 2))
+  [[ -n ${BTJAM_FAST:-} ]] && n=1   # test suite: don't wait
+  for ((i = 0; i < n; i++)); do
     s=$(audio_sink_for_mac "$1")
     [[ -n $s ]] && { printf '%s\n' "$s"; return 0; }
     sleep 0.5
@@ -59,13 +60,47 @@ audio_wait_for_named_sink() {    # NAME SECONDS
   return 1
 }
 
-# Some speakers connect in "headset/phone call" mode; switch to music (A2DP) mode.
+# Profiles of a card that can play sound, best first (music/A2DP modes first,
+# then by priority). Read from the card itself, so codec-specific names like
+# a2dp-sink-aac or a2dp_sink all work.
+audio_output_profiles() {
+  pa list cards 2>/dev/null | awk -v c="$1" '
+    $1 == "Name:" { inc = ($2 == c); inprof = 0 }
+    inc && /^\tProfiles:/ { inprof = 1; next }
+    inc && inprof && /^\t[^\t]/ { inprof = 0 }
+    inc && inprof && /^\t\t[^\t]/ {
+      name = $1; sub(/:$/, "", name)
+      s = 0; if (match($0, /sinks: [0-9]+/)) s = substr($0, RSTART + 7, RLENGTH - 7) + 0
+      if (s < 1 || $0 ~ /available: no/) next
+      pr = 0; if (match($0, /priority: [0-9]+/)) pr = substr($0, RSTART + 10, RLENGTH - 10) + 0
+      if (name ~ /a2dp/) pr += 1000000
+      print pr "|" name
+    }' | sort -t'|' -k1,1nr | cut -d'|' -f2
+}
+
+audio_active_profile() {
+  pa list cards 2>/dev/null | awk -v c="$1" '
+    $1 == "Name:" { inc = ($2 == c) }
+    inc && /^\tActive Profile:/ { print $3; exit }'
+}
+
+# The card exists but has no sound output (profile "off", or stuck in a mode
+# without one). Switch to the best profile that plays sound; prints its name.
 audio_force_a2dp() {
   local card p
   card=$(audio_card_for_mac "$1")
   [[ -z $card ]] && return 1
-  for p in a2dp-sink a2dp_sink a2dp-sink-sbc a2dp-sink-aac; do
-    pa set-card-profile "$card" "$p" >>"$LOG_FILE" 2>&1 && { log "profile $card -> $p"; return 0; }
+  log "profiles for $card: $(audio_output_profiles "$card" | tr '\n' ' ')(active: $(audio_active_profile "$card"))"
+  while IFS= read -r p; do
+    [[ -z $p ]] && continue
+    if pa set-card-profile "$card" "$p" >>"$LOG_FILE" 2>&1; then
+      log "profile $card -> $p"
+      printf '%s\n' "$p"
+      return 0
+    fi
+  done < <(audio_output_profiles "$card")
+  for p in a2dp-sink a2dp_sink; do          # very old servers don't list profiles well
+    pa set-card-profile "$card" "$p" >>"$LOG_FILE" 2>&1 && { log "profile $card -> $p"; printf '%s\n' "$p"; return 0; }
   done
   return 1
 }

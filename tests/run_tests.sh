@@ -10,7 +10,7 @@
 ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
-export MOCK_DIR="$WORK/mock" BTJAM_STATE_DIR="$WORK/state" BTJAM_SCAN_SECS=1 BTJAM_NO_CLEAR=1 NO_COLOR=1
+export MOCK_DIR="$WORK/mock" BTJAM_STATE_DIR="$WORK/state" BTJAM_SCAN_SECS=1 BTJAM_NO_CLEAR=1 BTJAM_FAST=1 NO_COLOR=1
 mkdir -p "$MOCK_DIR" "$WORK/bin"
 export PATH="$WORK/bin:$PATH"
 
@@ -42,13 +42,43 @@ EOF
   # inputs: idx|sink-name|client|kind|label   (a music app already playing)
   echo "70|alsa_output.pci-0000_00_1f.3.analog-stereo|42|user|Spotify" >"$MOCK_DIR/inputs"
   echo "alsa_output.pci-0000_00_1f.3.analog-stereo" >"$MOCK_DIR/default"
-  : >"$MOCK_DIR/offsets"; : >"$MOCK_DIR/played"; : >"$MOCK_DIR/errors"
+  : >"$MOCK_DIR/cards"; : >"$MOCK_DIR/played"; : >"$MOCK_DIR/errors"
 }
+
+# Shared state helpers for the fake tools.
+# cards: idx|card-name|active-profile|latency-offset-usec
+# A card's sink exists only while its profile is not "off" (like the real thing).
+cat >"$WORK/mocklib.sh" <<'MOCK'
+D=$MOCK_DIR
+next() { local n; n=$(cat "$D/next"); echo $((n + 1)) >"$D/next"; echo "$n"; }
+card_of_mac() { local m=${1^^}; echo "bluez_card.${m//:/_}"; }
+sink_of_card() { echo "bluez_output.${1#bluez_card.}.1"; }
+rm_sink() {
+  awk -F'|' -v n="$1" '$2!=n' "$D/sinks" >"$D/t" && mv "$D/t" "$D/sinks"
+  awk -F'|' -v n="$1" '!($2==n && $4=="internal")' "$D/inputs" >"$D/t" && mv "$D/t" "$D/inputs"
+}
+card_set_profile() {          # CARD PROFILE
+  local c=$1 p=$2 s; s=$(sink_of_card "$1")
+  awk -F'|' -v OFS='|' -v c="$c" -v p="$p" '$2==c{$3=p} 1' "$D/cards" >"$D/t" && mv "$D/t" "$D/cards"
+  if [[ $p == off ]]; then rm_sink "$s"
+  elif ! grep -qF "|$s|" "$D/sinks"; then echo "$(next)|$s|20|100|no" >>"$D/sinks"; fi
+}
+card_add() {                  # MAC PROFILE
+  local c; c=$(card_of_mac "$1")
+  grep -qF "|$c|" "$D/cards" || echo "$(next)|$c|off|0" >>"$D/cards"
+  card_set_profile "$c" "$2"
+}
+card_remove() {               # MAC
+  local c; c=$(card_of_mac "$1")
+  rm_sink "$(sink_of_card "$c")"
+  awk -F'|' -v c="$c" '$2!=c' "$D/cards" >"$D/t" && mv "$D/t" "$D/cards"
+}
+MOCK
+export MOCK_LIB="$WORK/mocklib.sh"
 
 cat >"$WORK/bin/pactl" <<'MOCK'
 #!/usr/bin/env bash
-D=$MOCK_DIR
-next() { local n; n=$(cat "$D/next"); echo $((n + 1)) >"$D/next"; echo "$n"; }
+source "$MOCK_LIB"
 sidx() { awk -F'|' -v n="$1" '$2==n{print $1}' "$D/sinks"; }
 exists() { awk -F'|' -v n="$1" '$2==n{f=1} END{exit !f}' "$D/sinks"; }
 upd_sink() { awk -F'|' -v OFS='|' -v n="$1" -v c="$2" -v v="$3" '$2==n{$c=v} 1' "$D/sinks" >"$D/t" && mv "$D/t" "$D/sinks"; }
@@ -60,7 +90,7 @@ case "$1" in
       case $3 in
         sinks) awk -F'|' '{printf "%s\t%s\tPipeWire\ts16le 2ch 48000Hz\tRUNNING\n",$1,$2}' "$D/sinks" ;;
         modules) awk -F'|' '{printf "%s\t%s\t%s\n",$1,$2,$3}' "$D/modules" ;;
-        cards) awk -F'|' '$2 ~ /^bluez_output/ {n=$2; sub(/^bluez_output\./,"bluez_card.",n); sub(/\.1$/,"",n); printf "%d\t%s\tmodule-bluez5-device.c\n",$1+500,n}' "$D/sinks" ;;
+        cards) awk -F'|' '{printf "%s\t%s\tmodule-bluez5-device.c\n",$1,$2}' "$D/cards" ;;
         sink-inputs) while IFS='|' read -r i s c k l; do printf '%s\t%s\t%s\tPipeWire\ts16le\n' "$i" "$(sidx "$s")" "$c"; done <"$D/inputs" ;;
       esac
     else
@@ -77,11 +107,15 @@ case "$1" in
             echo
           done <"$D/inputs" ;;
         cards)
-          awk -F'|' '$2 ~ /^bluez_output/ {print $1"|"$2}' "$D/sinks" | while IFS='|' read -r i n; do
-            card=${n/bluez_output./bluez_card.}; card=${card%.1}
-            off=$(awk -F'|' -v c="$card" '$1==c{v=$3} END{print v+0}' "$D/offsets")
-            printf 'Card #%d\n\tName: %s\n\tDriver: module-bluez5-device.c\n\tProfiles:\n\t\ta2dp-sink: High Fidelity Playback (sinks: 1, sources: 0, priority: 40, available: yes)\n\tActive Profile: a2dp-sink\n\tPorts:\n\t\theadset-output: Headset (type: Headset, priority: 0, latency offset: %d usec, availability unknown)\n\t\t\tPart of profile(s): a2dp-sink\n\t\theadset-input: Headset (type: Headset, priority: 0, latency offset: 0 usec, not available)\n\n' $((i + 500)) "$card" "$off"
-          done ;;
+          while IFS='|' read -r i card prof off; do
+            printf 'Card #%d\n\tName: %s\n\tDriver: module-bluez5-device.c\n\tProfiles:\n' "$i" "$card"
+            printf '\t\ta2dp-sink: High Fidelity Playback (A2DP Sink) (sinks: 1, sources: 0, priority: 40, available: yes)\n'
+            printf '\t\theadset-head-unit: Headset Head Unit (HSP/HFP) (sinks: 1, sources: 1, priority: 30, available: yes)\n'
+            printf '\t\toff: Off (sinks: 0, sources: 0, priority: 0, available: yes)\n'
+            printf '\tActive Profile: %s\n\tPorts:\n' "$prof"
+            printf '\t\theadset-output: Headset (type: Headset, priority: 0, latency offset: %d usec, availability unknown)\n\t\t\tPart of profile(s): a2dp-sink, headset-head-unit\n' "$off"
+            printf '\t\theadset-input: Headset (type: Headset, priority: 0, latency offset: 0 usec, not available)\n\n'
+          done <"$D/cards" ;;
       esac
     fi ;;
   load-module)
@@ -116,22 +150,26 @@ case "$1" in
     cur=$(awk -F'|' -v n="$2" '$2==n{print $5}' "$D/sinks")
     case $3 in 1|yes|true) v=yes ;; 0|no|false) v=no ;; toggle) [[ $cur == yes ]] && v=no || v=yes ;; esac
     upd_sink "$2" 5 "$v" ;;
-  set-card-profile) exit 0 ;;
+  set-card-profile)
+    grep -qF "|$2|" "$D/cards" || { echo "Failure: No such entity" >&2; exit 1; }
+    [[ $3 =~ ^(a2dp-sink|headset-head-unit|off)$ ]] || { echo "Failure: No such entity" >&2; exit 1; }
+    echo "$2 $3" >>"$D/profile_calls"
+    card_set_profile "$2" "$3" ;;
   set-port-latency-offset)
-    awk -F'|' -v c="$2" '$1!=c' "$D/offsets" >"$D/t"; echo "$2|$3|$4" >>"$D/t"; mv "$D/t" "$D/offsets" ;;
+    awk -F'|' -v OFS='|' -v c="$2" -v v="$4" '$2==c{$4=v} 1' "$D/cards" >"$D/t" && mv "$D/t" "$D/cards" ;;
   *) echo "mock pactl: unsupported $*" >>"$D/errors"; exit 1 ;;
 esac
 MOCK
 
 cat >"$WORK/bin/bluetoothctl" <<'MOCK'
 #!/usr/bin/env bash
-D=$MOCK_DIR
+source "$MOCK_LIB"
 field() { awk -F'|' -v m="$1" -v c="$2" 'toupper($1)==toupper(m){print $c}' "$D/devices"; }
 setf()  { awk -F'|' -v OFS='|' -v m="$1" -v c="$2" -v v="$3" 'toupper($1)==toupper(m){$c=v} 1' "$D/devices" >"$D/t" && mv "$D/t" "$D/devices"; }
 sinkname() { local m=${1^^}; echo "bluez_output.${m//:/_}.1"; }
-[[ $1 == --timeout ]] && shift 2
+while [[ $1 == --timeout || $1 == --agent ]]; do [[ $1 == --agent ]] && echo "$2" >"$D/agent"; shift 2; done
 case "$1" in
-  --help) echo "  --timeout secs   Timeout in seconds for non-interactive mode" ;;
+  --help) printf '  --agent capability\n  --timeout secs   Timeout in seconds for non-interactive mode\n' ;;
   show) echo "Controller 00:1A:7D:DA:71:13 (public)"; echo "	Powered: $(cat "$D/powered")" ;;
   power) echo yes >"$D/powered" ;;
   scan) exit 0 ;;
@@ -146,20 +184,38 @@ case "$1" in
   connect)
     [[ $(field "$2" 6) == 1 ]] || { echo "Failed to connect"; exit 1; }
     setf "$2" 5 yes
+    # column 7 = how the device behaves:
+    #   (empty)    normal: music channel opens, sound output appears
+    #   profileoff sound card appears but switched "off" (no output)
+    #   noprofile  only the basic link connects; music channel needs ConnectProfile
+    #   dead       connects, but never offers any audio
     if [[ $(field "$2" 3) == 1 ]]; then
-      n=$(cat "$D/next"); echo $((n + 1)) >"$D/next"
-      echo "$n|$(sinkname "$2")|20|100|no" >>"$D/sinks"
+      case $(field "$2" 7) in
+        profileoff) card_add "$2" off ;;
+        noprofile | dead) ;;
+        *) card_add "$2" a2dp-sink ;;
+      esac
     fi
     echo "Connection successful" ;;
   disconnect)
     setf "$2" 5 no
-    s=$(sinkname "$2")
-    awk -F'|' -v n="$s" '$2!=n' "$D/sinks" >"$D/t" && mv "$D/t" "$D/sinks"
-    awk -F'|' -v n="$s" '!($2==n && $4=="internal")' "$D/inputs" >"$D/t" && mv "$D/t" "$D/inputs"
+    card_remove "$2"
     echo "Successful disconnected" ;;
   remove) awk -F'|' -v m="$2" 'toupper($1)!=toupper(m)' "$D/devices" >"$D/t" && mv "$D/t" "$D/devices" ;;
   *) exit 0 ;;
 esac
+MOCK
+
+# busctl: only ConnectProfile (opening the music channel) is simulated
+cat >"$WORK/bin/busctl" <<'MOCK'
+#!/usr/bin/env bash
+source "$MOCK_LIB"
+[[ $1 == call && $5 == ConnectProfile ]] || exit 1
+id=${3##*/dev_}; mac=${id//_/:}
+echo "$mac" >>"$D/connectprofile_calls"
+mode=$(awk -F'|' -v m="$mac" 'toupper($1)==toupper(m){print $7}' "$D/devices")
+[[ $mode == dead ]] && { echo "Call failed: br-connection-profile-unavailable" >&2; exit 1; }
+card_add "$mac" a2dp-sink
 MOCK
 
 cat >"$WORK/bin/paplay" <<'MOCK'
@@ -273,6 +329,34 @@ check "no jam output left"           test "$(jam_count)" -eq 0
 check "default output restored"      test "$(default_sink)" = alsa_output.pci-0000_00_1f.3.analog-stereo
 check "music back on laptop"         test "$(stream_sink)" = alsa_output.pci-0000_00_1f.3.analog-stereo
 check "no lost streams, no loops"    eval 'no_lost && no_errors'
+
+# ---------------------------------------------------------------------
+echo "== Speakers whose sound output doesn't appear on connect (2nd-speaker bug)"
+reset_world
+E=BB:BB:BB:00:00:01 F=BB:BB:BB:00:00:02 G=BB:BB:BB:00:00:03
+cat >>"$MOCK_DIR/devices" <<EOF
+$E|Airdopes Max|1|no|no|1|profileoff
+$F|boAt Stone|1|no|no|1|noprofile
+$G|Broken Box|1|no|no|1|dead
+EOF
+check "first speaker connects normally" eval "bt_connect $A >/dev/null"
+check "pairs with NoInputNoOutput agent" grep -qx NoInputNoOutput "$MOCK_DIR/agent"
+out=$(bt_connect $E 2>&1)
+check "card switched 'off' -> fixed"     test -n "$(audio_sink_for_mac $E)"
+check "picked the music (A2DP) mode"     grep -q "bluez_card.BB_BB_BB_00_00_01 a2dp-sink" "$MOCK_DIR/profile_calls"
+check "told the user what it did"        grep -q 'Switching Airdopes Max to music mode' <<<"$out"
+out=$(bt_connect $F 2>&1)
+check "missing music channel -> opened"  test -n "$(audio_sink_for_mac $F)"
+check "used ConnectProfile for it"       grep -qx $F "$MOCK_DIR/connectprofile_calls"
+check "told the user what it did"        grep -q 'Opening the music channel to boAt Stone' <<<"$out"
+out=$(bt_connect $G 2>&1); rc=$?
+check "hopeless speaker fails cleanly"   test $rc -ne 0
+check "explains adapter limit"           grep -q "can't stream to one more device" <<<"$out"
+check "points to diagnose.sh"            grep -q 'diagnose.sh' <<<"$out"
+check "3 speakers can jam together"      jam_build $A $E $F
+check "profile list puts A2DP first"     test "$(audio_output_profiles bluez_card.BB_BB_BB_00_00_01 | head -1)" = a2dp-sink
+check "diagnose.sh runs"                 eval '(cd "$WORK" && "$ROOT/diagnose.sh" $E >/dev/null 2>&1) && grep -q "Active mode:  a2dp-sink" "$WORK/bt-jam-report.txt"'
+check "diagnose.sh flags missing channel" eval '(cd "$WORK" && "$ROOT/diagnose.sh" $G >/dev/null 2>&1) && grep -q "music channel is not open" "$WORK/bt-jam-report.txt"'
 
 # ---------------------------------------------------------------------
 echo "== Menu: Quick Jam end-to-end (as a user would type it)"

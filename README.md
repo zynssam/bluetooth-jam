@@ -54,7 +54,7 @@ through all of them.
 - 🔌 **Dropout recovery**: reconnect a speaker that went out of range
 - 🔔 **"Which one is which?"**: beep a single speaker (the tone is generated in pure shell)
 - 🎵 **Built-in player**: play a file or a whole folder, or just use Spotify, a browser or VLC
-- 🧪 **72 automated tests** that run without any Bluetooth hardware
+- 🧪 **88 automated tests** that run without any Bluetooth hardware
 
 ## 🚀 Quick start
 
@@ -89,6 +89,7 @@ you're done. 🎉
 | `./jam.sh --status` | Show the jam, its speakers, levels and delays |
 | `./jam.sh --stop` | Stop the jam and send audio back to your normal output |
 | `./check_deps.sh` | Check requirements |
+| `./diagnose.sh` | Report on why a speaker won't play (saved to `bt-jam-report.txt`) |
 | `./install.sh --uninstall` | Remove the `bt-jam` command |
 
 Closing the menu **leaves the jam playing**, so you can close the terminal and keep partying.
@@ -104,7 +105,10 @@ flowchart LR
 ```
 
 1. **Bluetooth:** `bluetoothctl` scans, pairs, trusts and connects each speaker.
-   If a speaker connects in phone-call mode, it's switched to music (A2DP) mode.
+   If the music (A2DP) channel doesn't open, bt-jam opens it directly through
+   BlueZ's D-Bus `ConnectProfile`. If the speaker's sound card shows up switched
+   off or in phone-call mode, bt-jam reads the modes the card offers and
+   switches to the best music mode.
 2. **Combining:** `pactl load-module module-combine-sink` creates one virtual
    output that copies the sound to every speaker. It becomes the default output,
    and apps that are already playing are moved onto it.
@@ -122,6 +126,7 @@ bluetooth-jam/
 ├── jam.sh              # entry point: menu + --status / --stop
 ├── install.sh          # chmod + `bt-jam` shortcut
 ├── check_deps.sh       # requirement checker with distro-specific install hints
+├── diagnose.sh         # troubleshooting report for a speaker that won't play
 ├── lib/
 │   ├── common.sh       # colours, prompts, state, logging
 │   ├── bluetooth.sh    # scan / pair / connect / disconnect
@@ -130,7 +135,7 @@ bluetooth-jam/
 │   ├── menus.sh        # all menus
 │   └── player.sh       # background music player (mpv/ffplay/cvlc/pw-play/paplay)
 └── tests/
-    └── run_tests.sh    # 72 checks against simulated bluetoothctl + pactl
+    └── run_tests.sh    # 88 checks against simulated bluetoothctl + pactl
 ```
 
 Every part of the program is a `.sh` file. There are no other languages and no GUI frameworks.
@@ -142,8 +147,8 @@ Every part of the program is a `.sh` file. There are no other languages and no G
 ```
 
 The test suite creates fake `bluetoothctl`, `pactl` and `paplay` commands that act
-like a PipeWire system with several speakers. One of them is out of range, and
-there's a mouse that should be ignored. The tests cover discovery, connecting,
+like a PipeWire system with several speakers. One of them is out of range, some
+connect without a working music channel, and there's a mouse that should be ignored. The tests cover discovery, connecting,
 the jam, add/remove/swap while music plays, a speaker dropping out, volume,
 mute, delay, the music player, stopping, and full menu sessions typed in as a
 user would. GitHub Actions runs them and ShellCheck on every push.
@@ -158,7 +163,7 @@ user would. GitHub Actions runs them and ShellCheck on every push.
 | Problem | Try |
 |---|---|
 | Speaker not found | Disconnect it from your phone, hold its Bluetooth button until it flashes, then scan again. Or pick "show ALL devices" |
-| Connected but silent | Turn the speaker off and on, then connect again |
+| "Connected, but Linux never got a sound output" | bt-jam already tries to open the music channel and switch modes. If it still fails, your adapter may have hit its limit (a USB dongle helps), or pairing didn't finish (*Manage speakers → Forget*, then add it again). Run `./diagnose.sh` and open an issue with the report |
 | Choppy sound | Use fewer speakers, move them closer, or add a dongle |
 | "No Bluetooth adapter" | `sudo systemctl enable --now bluetooth` |
 | "Can't reach the sound server" | Don't use `sudo`. Run from your desktop session |
